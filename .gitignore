@@ -208,6 +208,8 @@ __marimo__/
 
 # Local training artifacts
 data/
+!/engine/data/
+!/engine/data/**
 datasets/
 outputs/
 output/

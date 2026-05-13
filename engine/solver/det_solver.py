@@ -90,6 +90,7 @@ class DetSolver(BaseSolver):
                 lr_warmup_scheduler=self.lr_warmup_scheduler,
                 writer=self.writer,
                 teacher_model=self.teacher_model, # NEW: Pass teacher model to train_one_epoch
+                accumulation_steps=getattr(args, 'accumulation_steps', 1),
             )
 
             if not self.self_lr_scheduler:  # update by epoch 

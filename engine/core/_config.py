@@ -74,6 +74,7 @@ class BaseConfig(object):
         self.ema_warmups: int = 2000
         self.sync_bn :bool = False
         self.clip_max_norm : float = 0.
+        self.accumulation_steps :int = 1
         self.find_unused_parameters :bool = None
 
         self.seed :int = None

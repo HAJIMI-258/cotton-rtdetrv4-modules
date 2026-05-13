@@ -60,12 +60,17 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
     cur_iters = epoch * len(data_loader)
 
     teacher_model = kwargs.get('teacher_model', None)
+    accumulation_steps = int(kwargs.get('accumulation_steps', 1) or 1)
+    accumulation_steps = max(1, accumulation_steps)
+    optimizer.zero_grad(set_to_none=True)
 
     for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         global_step = epoch * len(data_loader) + i
         metas = dict(epoch=epoch, step=i, global_step=global_step, epoch_step=len(data_loader))
+        did_optimizer_step = False
+        is_update_step = ((i + 1) % accumulation_steps == 0) or ((i + 1) == len(data_loader))
 
         teacher_encoder_output_for_distillation = None
         if teacher_model is not None:
@@ -91,22 +96,24 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
                 loss_dict = criterion(outputs, targets, **metas)
 
             loss = sum(loss_dict.values())
-            scaler.scale(loss).backward()
+            scaler.scale(loss / accumulation_steps).backward()
 
-            if max_norm > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            if is_update_step:
+                if max_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-            # Collect gradient
-            if dist_utils.is_main_process() and hasattr(criterion, 'distill_adaptive_params') and \
-               getattr(criterion, 'distill_adaptive_params') and \
-               criterion.distill_adaptive_params.get('enabled', False):
-                pct = _compute_encoder_transformer_grad_percentage(model)
-                encoder_grad_percentages.append(pct)
+                # Collect gradient after the accumulated backward pass.
+                if dist_utils.is_main_process() and hasattr(criterion, 'distill_adaptive_params') and \
+                   getattr(criterion, 'distill_adaptive_params') and \
+                   criterion.distill_adaptive_params.get('enabled', False):
+                    pct = _compute_encoder_transformer_grad_percentage(model)
+                    encoder_grad_percentages.append(pct)
 
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                did_optimizer_step = True
 
         else:
             outputs = model(samples, targets=targets,
@@ -114,30 +121,33 @@ def train_one_epoch(self_lr_scheduler, lr_scheduler, model: torch.nn.Module, cri
             loss_dict = criterion(outputs, targets, **metas)
 
             loss : torch.Tensor = sum(loss_dict.values())
-            optimizer.zero_grad()
-            loss.backward()
+            (loss / accumulation_steps).backward()
 
-            # Collect gradient
-            if dist_utils.is_main_process() and hasattr(criterion, 'distill_adaptive_params') and \
-               getattr(criterion, 'distill_adaptive_params') and \
-               criterion.distill_adaptive_params.get('enabled', False):
-                pct = _compute_encoder_transformer_grad_percentage(model)
-                encoder_grad_percentages.append(pct)
+            if is_update_step:
+                # Collect gradient after the accumulated backward pass.
+                if dist_utils.is_main_process() and hasattr(criterion, 'distill_adaptive_params') and \
+                   getattr(criterion, 'distill_adaptive_params') and \
+                   criterion.distill_adaptive_params.get('enabled', False):
+                    pct = _compute_encoder_transformer_grad_percentage(model)
+                    encoder_grad_percentages.append(pct)
 
-            if max_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-            optimizer.step()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                did_optimizer_step = True
 
-        # ema
-        if ema is not None:
-            ema.update(model)
+        # ema / lr update only after a real optimizer update.
+        if did_optimizer_step:
+            if ema is not None:
+                ema.update(model)
 
-        if self_lr_scheduler:
-            optimizer = lr_scheduler.step(cur_iters + i, optimizer)
-        else:
-            if lr_warmup_scheduler is not None:
-                lr_warmup_scheduler.step()
+            if self_lr_scheduler:
+                optimizer = lr_scheduler.step(cur_iters + i, optimizer)
+            else:
+                if lr_warmup_scheduler is not None:
+                    lr_warmup_scheduler.step()
 
         loss_dict_reduced = dist_utils.reduce_dict(loss_dict)
         loss_value = sum(loss_dict_reduced.values())

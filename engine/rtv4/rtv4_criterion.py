@@ -91,6 +91,22 @@ class RTv4Criterion(nn.Module):
 
 
     def loss_distillation(self, outputs, targets, indices, num_boxes, **kwargs):
+        """Foreground-aware feature distillation.
+
+        The original implementation averaged cosine distance over every spatial
+        token. For cotton disease/pest images, the target occupies a small part
+        of the image, so a full-map average can over-regularize the student to
+        learn leaf/background texture rather than lesion/pest regions.
+
+        This version keeps the same DINOv3 teacher/student feature interface but
+        weights feature tokens inside enlarged GT boxes much higher than the
+        background. It is controlled through distill_adaptive_params:
+            foreground_focus: bool, default True
+            fg_weight: float, default 1.0
+            bg_weight: float, default 0.03
+            box_scale: float, default 1.8
+            min_fg_pixels: int, default 4
+        """
         student_feature_map = outputs.get('student_distill_output')
         teacher_feature_map = outputs.get('teacher_encoder_output')
 
@@ -102,9 +118,6 @@ class RTv4Criterion(nn.Module):
         student_feature_map = student_feature_map.float()
         teacher_feature_map = teacher_feature_map.detach().float()
 
-        # _logger.info(f"[RTv4Criterion] Student feature map shape: {student_feature_map.shape}")
-        # _logger.info(f"[RTv4Criterion] Teacher feature map shape: {teacher_feature_map.shape}")
-
         if student_feature_map.shape[1] != teacher_feature_map.shape[1]:
             _logger.error(
                 f"[RTv4Criterion] Feature dimension mismatch! Student: {student_feature_map.shape[1]}, Teacher: {teacher_feature_map.shape[1]}")
@@ -113,15 +126,11 @@ class RTv4Criterion(nn.Module):
         H_s, W_s = student_feature_map.shape[2:]
         H_t, W_t = teacher_feature_map.shape[2:]
 
-        target_h, target_w = H_s, W_s
-
         if (H_s, W_s) != (H_t, W_t):
             _logger.warning(
                 f"[RTv4Criterion] Resizing teacher feature map from {H_t}x{W_t} to student's {H_s}x{W_s} for distillation.")
-            teacher_feature_map = F.interpolate(teacher_feature_map,
-                                                size=(target_h, target_w),
-                                                mode='bilinear',
-                                                align_corners=False)
+            teacher_feature_map = F.interpolate(
+                teacher_feature_map, size=(H_s, W_s), mode='bilinear', align_corners=False)
 
         student_output_flat = student_feature_map.flatten(2).permute(0, 2, 1)
         teacher_output_flat = teacher_feature_map.flatten(2).permute(0, 2, 1)
@@ -130,9 +139,54 @@ class RTv4Criterion(nn.Module):
         teacher_output_norm = F.normalize(teacher_output_flat, p=2, dim=-1, eps=1e-6)
 
         cos_sim = (student_output_norm * teacher_output_norm).sum(dim=-1).clamp(min=-1.0, max=1.0)
-        loss_distill = torch.nan_to_num((1 - cos_sim).mean(), nan=0.0, posinf=0.0, neginf=0.0)
+        loss_map = 1.0 - cos_sim
 
+        params = self.distill_adaptive_params or {}
+        foreground_focus = params.get('foreground_focus', True)
+
+        if foreground_focus and targets is not None and len(targets) > 0:
+            bg_weight = float(params.get('bg_weight', 0.03))
+            fg_weight = float(params.get('fg_weight', 1.0))
+            box_scale = float(params.get('box_scale', 1.8))
+            min_fg_pixels = int(params.get('min_fg_pixels', 4))
+
+            B = loss_map.shape[0]
+            weights_map = torch.full(
+                (B, H_s, W_s), bg_weight, dtype=loss_map.dtype, device=loss_map.device)
+
+            for b, target in enumerate(targets[:B]):
+                boxes = target.get('boxes', None)
+                if boxes is None or boxes.numel() == 0:
+                    continue
+                boxes = boxes.to(device=loss_map.device, dtype=loss_map.dtype)
+                cx, cy, bw, bh = boxes.unbind(dim=1)
+                bw = (bw * box_scale).clamp(min=1.0 / max(W_s, 1), max=1.0)
+                bh = (bh * box_scale).clamp(min=1.0 / max(H_s, 1), max=1.0)
+
+                x1 = ((cx - bw * 0.5) * W_s).floor().clamp(0, W_s - 1).long()
+                y1 = ((cy - bh * 0.5) * H_s).floor().clamp(0, H_s - 1).long()
+                x2 = ((cx + bw * 0.5) * W_s).ceil().clamp(1, W_s).long()
+                y2 = ((cy + bh * 0.5) * H_s).ceil().clamp(1, H_s).long()
+
+                for _x1, _y1, _x2, _y2 in zip(x1, y1, x2, y2):
+                    if (_x2 - _x1) * (_y2 - _y1) < min_fg_pixels:
+                        cx_i = ((_x1 + _x2) // 2).clamp(0, W_s - 1)
+                        cy_i = ((_y1 + _y2) // 2).clamp(0, H_s - 1)
+                        half = max(1, int(min_fg_pixels ** 0.5))
+                        _x1 = torch.clamp(cx_i - half, 0, W_s - 1)
+                        _x2 = torch.clamp(cx_i + half + 1, 1, W_s)
+                        _y1 = torch.clamp(cy_i - half, 0, H_s - 1)
+                        _y2 = torch.clamp(cy_i + half + 1, 1, H_s)
+                    weights_map[b, _y1:_y2, _x1:_x2] = fg_weight
+
+            weights = weights_map.flatten(1)
+            loss_distill = (loss_map * weights).sum() / weights.sum().clamp_min(1.0)
+        else:
+            loss_distill = loss_map.mean()
+
+        loss_distill = torch.nan_to_num(loss_distill, nan=0.0, posinf=0.0, neginf=0.0)
         return {'loss_distill': loss_distill}
+
 
 
     def _get_distillation_weight_for_epoch(self) -> float:
