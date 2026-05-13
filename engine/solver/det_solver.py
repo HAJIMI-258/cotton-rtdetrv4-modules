@@ -97,7 +97,7 @@ class DetSolver(BaseSolver):
                 if self.lr_warmup_scheduler is None or self.lr_warmup_scheduler.finished():
                     self.lr_scheduler.step()
 
-            self.last_epoch += 1
+            self.last_epoch = epoch
             if dist_utils.is_main_process() and hasattr(self.criterion, 'distill_adaptive_params') and \
                 self.criterion.distill_adaptive_params and self.criterion.distill_adaptive_params.get('enabled', False):
 
@@ -141,9 +141,8 @@ class DetSolver(BaseSolver):
                     self.criterion.weight_dict['loss_distill'] = new_weight
                 print(f"Epoch {epoch}: avg encoder grad {avg_percentage:.2f}% | distill {current_weight:.6f} -> {new_weight:.6f} ({reason})")
 
-            if self.output_dir and epoch < self.train_dataloader.collate_fn.stop_epoch:
+            if self.output_dir:
                 checkpoint_paths = [self.output_dir / 'last.pth']
-                # extra checkpoint before LR drop and every 100 epochs
                 if (epoch + 1) % args.checkpoint_freq == 0:
                     checkpoint_paths.append(self.output_dir / f'checkpoint{epoch:04}.pth')
                 for checkpoint_path in checkpoint_paths:

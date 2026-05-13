@@ -188,7 +188,8 @@ train_dataloader:
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
         - {type: ConvertBoxes, fmt: 'cxcywh', normalize: True}
       policy:
-        epoch: [4, 45, 120]
+        name: stop_epoch
+        epoch: [4, 45, 100]
         ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
       mosaic_prob: 0.4
   shuffle: True
@@ -201,7 +202,7 @@ train_dataloader:
     base_size_repeat: 3
     mixup_prob: 0.2
     mixup_epochs: [4, 45]
-    stop_epoch: 120
+    stop_epoch: 100
     ema_restart_decay: 0.9998
 
 val_dataloader:
