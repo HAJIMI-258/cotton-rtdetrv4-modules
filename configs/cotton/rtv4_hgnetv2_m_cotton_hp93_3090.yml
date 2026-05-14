@@ -112,9 +112,9 @@ DFINETransformer:
 PostProcessor:
   num_top_queries: 300
 
-# Single 3090: real batch 4, accumulated 4 -> effective batch 16.
-# If CUDA OOM, set total_batch_size to 2 and accumulation_steps to 8.
-accumulation_steps: 4
+# Single 3090: real batch 8, accumulated 2 -> effective batch 16.
+# If CUDA OOM, set total_batch_size to 4 and accumulation_steps to 4.
+accumulation_steps: 2
 
 epoches: 120
 flat_epoch: 60
@@ -193,7 +193,7 @@ train_dataloader:
         ops: ['Mosaic', 'RandomPhotometricDistort', 'RandomZoomOut', 'RandomIoUCrop']
       mosaic_prob: 0.4
   shuffle: True
-  total_batch_size: 4
+  total_batch_size: 8
   num_workers: 4
   drop_last: True
   collate_fn:
@@ -214,6 +214,6 @@ val_dataloader:
         - {type: Resize, size: [704, 704]}
         - {type: ConvertPILImage, dtype: 'float32', scale: True}
   shuffle: False
-  total_batch_size: 8
+  total_batch_size: 16
   num_workers: 4
   drop_last: False
